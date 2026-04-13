@@ -19,8 +19,6 @@ classes = class_csv['primary_label'].tolist()
 
 train_csv = pd.read_csv(os.path.join(BASE, 'train.csv'))
 for index, row in train_csv.iterrows():
-    if index == 3000:
-        break
     filename = row['filename'].replace('.ogg', '.npy')
     audio_path = os.path.join('mel-spectrograms', filename)
     label = row['primary_label']
