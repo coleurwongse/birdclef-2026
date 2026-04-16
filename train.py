@@ -138,7 +138,8 @@ def resnet_v2(input_shape, depth, num_classes=10):
     x = Activation('relu')(x)
     x = AveragePooling2D(pool_size=8)(x)
     y = Flatten()(x)
-    outputs = Dense(num_classes, activation='softmax', kernel_initializer='he_normal')(y)
+    y = Dense(num_classes, activation='softmax', kernel_initializer='he_normal')(y)
+    outputs = keras.layers.Dropout(0.5)(y)
     model = Model(inputs=inputs, outputs=outputs)
     return model
 
