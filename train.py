@@ -138,8 +138,7 @@ def resnet_v2(input_shape, depth, num_classes=10):
     x = Activation('relu')(x)
     x = AveragePooling2D(pool_size=8)(x)
     y = Flatten()(x)
-    y = Dense(num_classes, activation='softmax', kernel_initializer='he_normal')(y)
-    outputs = keras.layers.Dropout(0.1)(y)
+    outputs = Dense(num_classes, activation='softmax', kernel_initializer='he_normal')(y)
     model = Model(inputs=inputs, outputs=outputs)
     return model
 
@@ -151,7 +150,7 @@ lr_scheduler = LearningRateScheduler(lr_schedule)
 lr_reducer = ReduceLROnPlateau(factor=np.sqrt(0.1), cooldown=0, patience=5, min_lr=0.5e-6)
 callbacks = [checkpoint, lr_reducer, lr_scheduler]
 
-model = resnet_v2(input_shape=(216, 128, 1), depth=depth, num_classes=num_classes)
+model = resnet_v2(input_shape=(216, 128, 1), depth=depth, num_classes=len(classes))
 model.compile(optimizer='adam',
               loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
               metrics=['accuracy'])
