@@ -1,13 +1,14 @@
-import torch
-import torchvision.models as models
-import torch.nn as nn
+import os
 import numpy as np
+import tensorflow as tf
+import tensorflow.keras as keras
+from tensorflow.keras.layers import Dense, Conv2D, BatchNormalization
+from tensorflow.keras.layers import AveragePooling2D, Input, ReLU, MaxPool2D, GlobalAveragePooling2D, concatenate
+from tensorflow.keras.callbacks import ModelCheckpoint, LearningRateScheduler, ReduceLROnPlateau
+import tensorflow.keras.backend as K
+from tensorflow.keras.models import Model
 import pandas as pd
 import sklearn
-import os
-
-# Load the pre-trained EfficientNet model
-model = models.efficientnet_b0(pretrained=False)
 
 BASE = 'birdclef-2026'
 audio_data = []
@@ -34,6 +35,12 @@ for index, row in train_csv.iterrows():
         print(index)
 
 label_encoder = sklearn.preprocessing.LabelEncoder()
+minmax_scaler = sklearn.preprocessing.MinMaxScaler()
+audio_data = np.array(audio_data)
+n_samples, n_timesteps, n_features = audio_data.shape
+audio_data = audio_data.reshape(-1, n_features)
+audio_data = minmax_scaler.fit_transform(audio_data)
+audio_data = audio_data.reshape(n_samples, n_timesteps, n_features)
 encoded_labels = label_encoder.fit_transform(labels)
 X_train, X_test, y_train, y_test = sklearn.model_selection.train_test_split(audio_data, encoded_labels, test_size=0.2, random_state=42)
 
@@ -46,80 +53,77 @@ X_test = [np.pad(spec, ((0, max_length - spec.shape[0]), (0, 0)), mode='constant
 X_train = np.array(X_train)
 X_test = np.array(X_test)
 
-# Freeze all the layers except the last one
-# for param in model.parameters():
-#     param.requires_grad = False
+batch_size = 32
+epochs = 200
+data_augmentation = True
+num_classes = 10
+subtract_pixel_mean = True
+depth = 29
 
-# Get the number of input features of the last fully connected layer
-model.features[0][0] = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
-num_ftrs = model.classifier[1].in_features
+img_height = 224
+img_width = 224
 
-# Replace the last fully connected layer with a new one
-model.classifier[1] = nn.Linear(num_ftrs, len(classes))
+def lr_schedule(epoch):
+    lr = 1e-3
+    if epoch > 180:
+        lr *= 0.5e-3
+    elif epoch > 160:
+        lr *= 1e-3
+    elif epoch > 120:
+        lr *= 1e-2
+    elif epoch > 80:
+        lr *= 1e-1
+    print('Learning rate:', lr)
+    return lr
 
-# Create the data loaders
-X_train = torch.from_numpy(X_train)
-X_test = torch.from_numpy(X_test)
-y_train = torch.from_numpy(y_train)
-y_test = torch.from_numpy(y_test)
-train_data = torch.utils.data.TensorDataset(X_train, y_train)
-test_data = torch.utils.data.TensorDataset(X_test, y_test)
-train_loader = torch.utils.data.DataLoader(train_data, batch_size=32, shuffle=True)
-val_loader = torch.utils.data.DataLoader(test_data, batch_size=32, shuffle=False)
 
-# Define the loss function and optimizer
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.SGD(model.classifier[1].parameters(), lr=0.001, momentum=0.9)
+def densenet(input_shape, n_classes, filters=32):
+    # batch norm + relu + conv
+    def bn_rl_conv(x, filters, kernel=1, strides=1):
 
-# Move the model to the GPU if available
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
+        x = BatchNormalization()(x)
+        x = ReLU()(x)
+        x = Conv2D(filters, kernel, strides=strides, padding='same')(x)
+        return x
 
-# Training loop
-num_epochs = 500
-for epoch in range(num_epochs):
-    model.train()
-    running_loss = 0.0
-    for i, (images, labels) in enumerate(train_loader):
-        images = images.to(device)
-        labels = labels.to(device)
+    def dense_block(x, repetition):
 
-        optimizer.zero_grad()
-        if images.size != 884736:
-            continue
-        images = images.reshape(32, 1, 216, 128)
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
+        for _ in range(repetition):
+            y = bn_rl_conv(x, 4 * filters)
+            y = bn_rl_conv(y, filters, 3)
+            x = concatenate([y, x])
+        return x
 
-        running_loss += loss.item()
+    def transition_layer(x):
 
-    # Calculate the average training loss
-    train_loss = running_loss / len(train_loader)
+        x = bn_rl_conv(x, K.int_shape(x)[-1] // 2)
+        x = AveragePooling2D(2, strides=2, padding='same')(x)
+        return x
 
-    # Validation loop
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for images, labels in val_loader:
-            if images.size != 884736:
-                continue
-            images = images.reshape(32, 1, 216, 128)
-            images = images.to(device)
-            labels = labels.to(device)
+    input = Input(input_shape)
+    x = Conv2D(64, 7, strides=2, padding='same')(input)
+    x = MaxPool2D(3, strides=2, padding='same')(x)
 
-            outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+    for repetition in [6, 12, 24, 16]:
+        d = dense_block(x, repetition)
+        x = transition_layer(d)
+    x = GlobalAveragePooling2D()(d)
+    output = Dense(n_classes, activation='softmax')(x)
 
-    # Calculate the validation accuracy
-    if total != 0:
-        val_acc = 100 * correct / total
-    else:
-        val_acc = 0
+    model = Model(input, output)
+    return model
 
-    print(f'Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Acc: {val_acc:.2f}%')
-torch.save(model.state_dict(), "efficientnet.pth")
+checkpoint = ModelCheckpoint(filepath='resnet.keras',
+                             monitor='val_accuracy',
+                             verbose=1,
+                             save_best_only=True)
+lr_scheduler = LearningRateScheduler(lr_schedule)
+lr_reducer = ReduceLROnPlateau(factor=np.sqrt(0.1), cooldown=0, patience=5, min_lr=0.5e-6)
+callbacks = [checkpoint, lr_reducer, lr_scheduler]
+
+model = densenet(input_shape=(216, 128, 1), depth=depth, num_classes=num_classes)
+model.compile(optimizer='adam',
+              loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+              metrics=['accuracy'])
+
+history = model.fit(X_train, y_train, validation_data=(X_test, y_test), epochs=epochs, callbacks=callbacks)
