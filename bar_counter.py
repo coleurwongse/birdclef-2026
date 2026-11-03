@@ -16,6 +16,13 @@ class Params:
     min_disc_area: int = 800
     min_circularity: float = 0.70
     max_circularity: float = 1.05
+    # Brightness checks are ratios, (bright - dark) / bright, so they hold up
+    # whether the scene is sunlit, overcast or indoors. min_gap is only a
+    # floor so sensor noise in near-black frames can't pass as contrast.
+    min_contrast: float = 0.35
+    min_gap: int = 12
+    # Used only on the disc interior after it's stretched to 0-255, so it's
+    # already independent of the overall lighting.
     core_gap: int = 50
     min_ink_fraction: float = 0.02
     min_bar_area_fraction: float = 0.004
@@ -60,6 +67,10 @@ class BarCounter:
     def __init__(self, params: Params = None):
         self.p = params or Params()
 
+    def contrasts(self, bright, dark):
+        bright, dark = float(bright), float(dark)
+        return bright - dark >= max(self.p.min_gap, self.p.min_contrast * bright)
+
     def dark(self, gray):
         thr, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         return (gray < thr).astype(np.uint8)
@@ -82,7 +93,7 @@ class BarCounter:
         vals = gray[blob]
         t, _ = cv2.threshold(vals.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         lo, hi = vals[vals <= t], vals[vals > t]
-        if lo.size and hi.size and hi.mean() - lo.mean() >= self.p.core_gap:
+        if lo.size and hi.size and self.contrasts(hi.mean(), lo.mean()):
             blob = blob & (gray <= t)
         return blob.astype(np.uint8)
 
@@ -110,7 +121,7 @@ class BarCounter:
         cv2.circle(ring, center, R, 1, -1)
         cv2.circle(ring, center, int(r * RING[0]), 0, -1)
         around = window[ring > 0]
-        return around.size > 0 and np.median(around) - np.median(inside) >= self.p.core_gap
+        return around.size > 0 and self.contrasts(np.median(around), np.median(inside))
 
     def nearest_disc(self, gray, value, prev_center=None):
         H, W = gray.shape
@@ -130,12 +141,18 @@ class BarCounter:
         cv2.circle(inner, (cx, cy), int(r * INNER), 1, -1)
         inside = gray[inner > 0]
 
+        ring = np.zeros(gray.shape, np.uint8)
+        cv2.circle(ring, (cx, cy), int(r * RING[1]), 1, -1)
+        cv2.circle(ring, (cx, cy), int(r * RING[0]), 0, -1)
+        paper = float(np.median(gray[ring > 0]))
+
         lo, hi = np.percentile(inside, [2, 98])
-        if hi - lo < 1:
-            stretched = gray
-        else:
-            alpha = 255.0 / (hi - lo)
-            stretched = cv2.convertScaleAbs(gray, alpha=alpha, beta=-lo * alpha)
+        if hi - lo < self.p.min_contrast * max(paper - lo, self.p.min_gap):
+            # Nothing inside gets even part way from disc-black to paper-white;
+            # stretching would only blow up noise/smudges into fake bars.
+            return np.zeros(gray.shape, np.uint8), inside.size
+        alpha = 255.0 / (hi - lo)
+        stretched = cv2.convertScaleAbs(gray, alpha=alpha, beta=-lo * alpha)
         inside = stretched[inner > 0]
 
         t, _ = cv2.threshold(inside, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
